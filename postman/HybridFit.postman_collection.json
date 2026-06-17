@@ -7,9 +7,9 @@
   },
   "variable": [
     {
-      "key": "baseUrl",
-      "value": "http://localhost:3000"
-    },
+  "key": "baseUrl",
+  "value": "https://backend-hybrid-n77ywfb21-papabumi.vercel.app/"
+},
     {
       "key": "userEmail",
       "value": "tester@hybridfit.dev"
