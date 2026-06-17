@@ -1,3 +1,5 @@
 const { createApp } = require("../src/index");
 
-module.exports = createApp();
+const app = createApp();
+
+module.exports = app;
