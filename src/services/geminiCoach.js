@@ -117,10 +117,12 @@ const DEFAULT_REDIRECT_EXAMPLES = [
 ];
 const PROGRAM_CHANGE_INTENT_KEYWORDS = [
   "buat program",
+  "buatkan program",
   "ubah program",
   "ganti program",
   "sesuaikan program",
   "buat jadwal",
+  "buatkan jadwal",
   "ubah jadwal",
   "ganti jadwal",
   "sesuaikan jadwal"
@@ -247,8 +249,22 @@ function looksLikeProgramChangeRequest(messages = []) {
     return false;
   }
 
-  return PROGRAM_CHANGE_INTENT_KEYWORDS.some((keyword) =>
-    latestUserText.includes(keyword)
+  const hasProgramOrSchedule =
+    latestUserText.includes("program") || latestUserText.includes("jadwal");
+  const hasCreateOrChangeIntent = [
+    "buat",
+    "buatkan",
+    "bikinkan",
+    "ubah",
+    "ganti",
+    "sesuaikan"
+  ].some((keyword) => latestUserText.includes(keyword));
+
+  return (
+    PROGRAM_CHANGE_INTENT_KEYWORDS.some((keyword) =>
+      latestUserText.includes(keyword)
+    ) ||
+    (hasProgramOrSchedule && hasCreateOrChangeIntent)
   );
 }
 
@@ -431,6 +447,87 @@ function looksTemporaryModelFailure(error) {
   );
 }
 
+function looksAuthenticationFailure(error) {
+  const message = String(error?.message || "").toLowerCase();
+  return (
+    message.includes("invalid authentication credentials") ||
+    message.includes("api key not valid") ||
+    message.includes("api_key_invalid") ||
+    message.includes("permission denied") ||
+    message.includes("unauthenticated") ||
+    message.includes("oauth 2 access token")
+  );
+}
+
+function inferProgramProposal(messages = [], profile = null) {
+  const latestUserText = normalizeText(extractLatestUserMessage(messages));
+  const requestedDays = latestUserText.match(/\b([1-7])\s*(hari|x|kali)\b/);
+  const requestedDuration = latestUserText.match(/\b(\d{2,3})\s*(menit|min)\b/);
+  const isRunProgram =
+    latestUserText.includes("lari") ||
+    latestUserText.includes("run") ||
+    latestUserText.includes("cardio") ||
+    latestUserText.includes("kardio");
+  const isRecoveryProgram =
+    latestUserText.includes("recovery") ||
+    latestUserText.includes("pemulihan") ||
+    latestUserText.includes("stretching") ||
+    latestUserText.includes("mobilitas");
+
+  const workoutDaysPerWeek = requestedDays
+    ? Number(requestedDays[1])
+    : Number(profile?.workoutDaysPerWeek) || 3;
+  const sessionDurationMinutes = requestedDuration
+    ? Number(requestedDuration[1])
+    : Number(profile?.sessionDurationMinutes) || 45;
+  const goal = isRunProgram ? "ENDURANCE" : profile?.goal || "MUSCLE_GAIN";
+  const preferredFocus = isRunProgram
+    ? "CARDIO"
+    : isRecoveryProgram
+      ? "RECOVERY"
+      : "STRENGTH";
+  const programLabel = isRunProgram
+    ? `lari ${workoutDaysPerWeek} hari`
+    : isRecoveryProgram
+      ? `recovery ${workoutDaysPerWeek} hari`
+      : `gym ${workoutDaysPerWeek} hari`;
+  const summaryLabel = `Program ${programLabel} • target ${sessionDurationMinutes} menit per sesi`;
+
+  return {
+    goal,
+    preferredFocus,
+    workoutDaysPerWeek,
+    sessionDurationMinutes,
+    programLabel,
+    summaryLabel
+  };
+}
+
+function buildLocalCoachFallback({ messages, profile }) {
+  if (looksLikeProgramChangeRequest(messages)) {
+    const proposal = inferProgramProposal(messages, profile);
+    return {
+      reply: [
+        "Saya siapkan rancangan program berdasarkan permintaan Anda.",
+        `${proposal.summaryLabel}.`,
+        "Kalau sudah cocok, konfirmasi dari aplikasi agar program aktif Anda diperbarui."
+      ].join(" "),
+      model: "fallback-local-program",
+      proposal
+    };
+  }
+
+  return {
+    reply: [
+      "AI Coach sedang memakai mode cadangan karena koneksi Gemini belum siap.",
+      "Saya tetap bisa bantu topik latihan, recovery, gym, lari, set, repetisi, dan jadwal.",
+      "Coba tulis lebih spesifik, misalnya: buatkan program gym 3 hari untuk pemula."
+    ].join(" "),
+    model: "fallback-local",
+    proposal: null
+  };
+}
+
 async function generateCoachReply({
   apiKey,
   user,
@@ -449,7 +546,7 @@ async function generateCoachReply({
   }
 
   if (!apiKey) {
-    throw new Error("GEMINI_API_KEY belum diatur di backend.");
+    return buildLocalCoachFallback({ messages, profile });
   }
 
   const payload = {
@@ -503,7 +600,11 @@ async function generateCoachReply({
         continue;
       }
 
-      throw lastError;
+      if (response.status === 401 || response.status === 403 || looksAuthenticationFailure(lastError)) {
+        return buildLocalCoachFallback({ messages, profile });
+      }
+
+      throw new Error("AI Coach belum dapat membalas. Coba lagi sebentar.");
     }
 
     const parsed = parseCoachJsonReply(extractReply(data));
@@ -525,6 +626,10 @@ async function generateCoachReply({
 
   if (looksTemporaryModelFailure(lastError)) {
     throw new Error("Gemini sedang sibuk sementara. Coba lagi beberapa saat.");
+  }
+
+  if (looksAuthenticationFailure(lastError)) {
+    return buildLocalCoachFallback({ messages, profile });
   }
 
   throw lastError || new Error("Semua model Gemini sedang tidak tersedia.");
